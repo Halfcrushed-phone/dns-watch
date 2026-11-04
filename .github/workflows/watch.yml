@@ -1,0 +1,94 @@
+# The phone-only DNS watcher. It runs under a GitHub account that is signed in ONLY on
+# the operator's phone, so nothing on the firm's PC can edit, disable or mute it
+# (RISK-2026-54; plan council .council/dns-watch-blind-spots-plan-2026-11-03/ in the
+# firm's website repo). A failed run reaches the phone through the GitHub app.
+#
+# It reads Cloudflare's audit log for every write to the firm's two zones, and checks
+# from outside that both domains still point at the firm's Cloudflare nameservers with
+# no DS record (the registrar, GoDaddy, is outside Cloudflare's log).
+#
+# Same two-job split as the firm repo, for the same reason: the read job fails only
+# when it cannot see, so the next run's window starts where the last SUCCESSFUL read
+# ended; findings go red in the verdict job.
+#
+# This file and the two scripts were copied from the firm repo on the day the watcher
+# was set up. Never make it fetch code from the firm repo: that repo is editable from
+# the PC this watcher exists to be independent of.
+
+name: DNS watch
+
+on:
+  schedule:
+    - cron: "23 3 * * *"
+  workflow_dispatch: {}
+
+concurrency:
+  group: dns-watch
+  cancel-in-progress: false
+
+jobs:
+  read:
+    name: the DNS change log could not be read - open this run
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      changes: ${{ steps.read.outputs.changes }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Read every write to the firm's zones since the last successful read
+        id: read
+        env:
+          CLOUDFLARE_AUDIT_READ_TOKEN: ${{ secrets.CLOUDFLARE_AUDIT_READ_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+          AUDIT_WORKFLOW_FILE: watch.yml
+          AUDIT_READ_JOB_NAME: the DNS change log could not be read - open this run
+          AUDIT_PUBLIC_OUTPUT: "1"   # run logs here are public: record names and types only
+        run: |
+          set -uo pipefail
+          rc=0; python3 dns_audit_log.py || rc=$?
+          if [ "$rc" = "1" ]; then
+            echo "changes=true" >> "$GITHUB_OUTPUT"
+          elif [ "$rc" != "0" ]; then
+            echo "::error::Could not read Cloudflare's change log. Usually the key expired or was"
+            echo "::error::revoked - and revoking it is exactly what an intruder would do. Renew it"
+            echo "::error::on your phone (README step 3). This is NOT an all-clear."
+            exit 1
+          fi
+
+  verdict:
+    name: Cloudflare logged a change to the firm's DNS - confirm every line is yours
+    needs: read
+    if: needs.read.outputs.changes == 'true'
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - run: |
+          echo "::error::Open the read job above: every line is one change. If you approved"
+          echo "::error::a change that day and every line is it, nothing to do. Any other line:"
+          echo "::error::revoke the 'WPM DNS edit' key in Cloudflare from your phone."
+          exit 1
+
+  # GitHub pauses schedules in a public repository after 60 days without activity, and
+  # a schedule that never starts sends no alert. Re-enabling the workflow each run is
+  # meant to restart that clock; the firm repo's sentinel-alive job is the backstop if
+  # it does not.
+  keepalive:
+    name: could not keep this watcher's schedule switched on
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api -X PUT "repos/${{ github.repository }}/actions/workflows/watch.yml/enable"
+
+  delegation:
+    name: a domain's nameservers changed at the registrar - check GoDaddy now
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 dns_delegation_verify.py
