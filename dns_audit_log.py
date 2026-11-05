@@ -74,6 +74,11 @@ WORKFLOW_FILE = os.environ.get("AUDIT_WORKFLOW_FILE", "dmarc-dns-integrity.yml")
 # every run would rescan from COMMISSIONED).
 READ_JOB_NAME = os.environ.get("AUDIT_READ_JOB_NAME",
                                "the DNS change log could not be read - open this run")
+# After the read job is renamed, its successful runs under the old name still anchor the
+# window, so the first run after a rename does not rescan from COMMISSIONED and re-report
+# changes already confirmed. One exact name, never a pattern; unset = only the current
+# name. It stops mattering on its own once RUN_PAGES of runs have passed.
+PREVIOUS_READ_JOB_NAME = os.environ.get("AUDIT_READ_JOB_PREVIOUS_NAME", "").strip()
 RUN_PAGES = 3  # 90 runs back; past that, fall back to COMMISSIONED
 PUBLIC = os.environ.get("AUDIT_PUBLIC_OUTPUT") == "1"
 
@@ -122,6 +127,7 @@ def last_successful_read(get=http_json) -> datetime | None:
     headers = {"Authorization": f"Bearer {os.environ['GH_TOKEN']}",
                "Accept": "application/vnd.github+json"}
     base = f"https://api.github.com/repos/{repo}/actions"
+    names = {READ_JOB_NAME} | ({PREVIOUS_READ_JOB_NAME} if PREVIOUS_READ_JOB_NAME else set())
     for page in range(1, RUN_PAGES + 1):
         # main only: a run on another branch must never move the window on.
         runs = get(f"{base}/workflows/{WORKFLOW_FILE}/runs?branch=main&per_page=30&page={page}",
@@ -131,7 +137,7 @@ def last_successful_read(get=http_json) -> datetime | None:
                 continue
             jobs = get(f"{base}/runs/{run['id']}/jobs?per_page=100", headers).get("jobs", [])
             for job in jobs:
-                if job.get("name") == READ_JOB_NAME and job.get("conclusion") == "success":
+                if job.get("name") in names and job.get("conclusion") == "success":
                     return parse_time(job["started_at"])
         if len(runs) < 30:
             break

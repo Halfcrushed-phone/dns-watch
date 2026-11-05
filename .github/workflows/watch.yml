@@ -11,16 +11,31 @@
 # when it cannot see, so the next run's window starts where the last SUCCESSFUL read
 # ended; findings go red in the verdict job.
 #
-# This file and the two scripts were copied from the firm repo on the day the watcher
-# was set up. Never make it fetch code from the firm repo: that repo is editable from
-# the PC this watcher exists to be independent of.
+# An alarm may arrive years after anyone last looked at this, so it has to explain
+# itself (plan council .council/dns-watch-clear-alarm-plan-2026-11-05/): the workflow
+# name is the email subject, job names say what each check is (a passing job is listed
+# too, so a name must not read as an alarm beside a green tick), and the `explain` job
+# writes what it means and what to do on the run page the email links to. A drill
+# every 15 January keeps the alarm familiar and proves it still arrives.
+#
+# NEVER change the cron line: GitHub sends a scheduled run's failure alert to the last
+# account that changed it, and it must stay the phone account (a firm-repo test pins it).
+#
+# This file and the two scripts were copied from the firm repo. Never make it fetch
+# code from the firm repo: that repo is editable from the PC this watcher exists to be
+# independent of.
 
-name: DNS watch
+name: WPM DNS ALARM (website and email) - open this, do not ignore
 
 on:
   schedule:
     - cron: "23 3 * * *"
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      drill:
+        description: "Fire drill: fail on purpose, to see what an alarm looks like"
+        type: boolean
+        default: false
 
 concurrency:
   group: dns-watch
@@ -28,7 +43,7 @@ concurrency:
 
 jobs:
   read:
-    name: the DNS change log could not be read - open this run
+    name: Check 1 of 3 - reading Cloudflare's change log
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -43,39 +58,65 @@ jobs:
           CLOUDFLARE_AUDIT_READ_TOKEN: ${{ secrets.CLOUDFLARE_AUDIT_READ_TOKEN }}
           GH_TOKEN: ${{ github.token }}
           AUDIT_WORKFLOW_FILE: watch.yml
-          AUDIT_READ_JOB_NAME: the DNS change log could not be read - open this run
+          AUDIT_READ_JOB_NAME: Check 1 of 3 - reading Cloudflare's change log
+          # The read job's name until 2026-11; its successful runs still mark where the
+          # last read ended, so the rename does not re-report changes already confirmed.
+          AUDIT_READ_JOB_PREVIOUS_NAME: the DNS change log could not be read - open this run
           AUDIT_PUBLIC_OUTPUT: "1"   # run logs here are public: record names and types only
         run: |
           set -uo pipefail
-          rc=0; python3 dns_audit_log.py || rc=$?
+          rc=0; python3 dns_audit_log.py > out.txt 2>&1 || rc=$?
+          cat out.txt
+          if grep -q '^CHANGE ' out.txt; then
+            {
+              echo "## Changes Cloudflare logged (one line each, times in UTC)"
+              echo
+              echo '```'
+              grep '^CHANGE ' out.txt | tr -d '`'
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
           if [ "$rc" = "1" ]; then
             echo "changes=true" >> "$GITHUB_OUTPUT"
           elif [ "$rc" != "0" ]; then
-            echo "::error::Could not read Cloudflare's change log. Usually the key expired or was"
-            echo "::error::revoked - and revoking it is exactly what an intruder would do. Renew it"
-            echo "::error::on your phone (README step 3). This is NOT an all-clear."
+            echo "::error::Could not read Cloudflare's change log - this is NOT an all-clear."
+            echo "::error::Open the run's summary page: 'What this alarm means' says what to do."
             exit 1
           fi
 
   verdict:
-    name: Cloudflare logged a change to the firm's DNS - confirm every line is yours
+    name: Check 2 of 3 - DNS changes logged (red = check them)
     needs: read
     if: needs.read.outputs.changes == 'true'
     runs-on: ubuntu-latest
     permissions: {}
     steps:
       - run: |
-          echo "::error::Open the read job above: every line is one change. If you approved"
-          echo "::error::a change that day and every line is it, nothing to do. Any other line:"
-          echo "::error::revoke the 'WPM DNS edit' key in Cloudflare from your phone."
+          echo "::error::Cloudflare logged changes to the firm's DNS. Open the run's summary"
+          echo "::error::page: 'What this alarm means' says how to tell if they were yours."
           exit 1
+
+  delegation:
+    name: Check 3 of 3 - domain registration at GoDaddy
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      rc: ${{ steps.check.outputs.rc }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: check
+        run: |
+          rc=0; python3 dns_delegation_verify.py || rc=$?
+          echo "rc=$rc" >> "$GITHUB_OUTPUT"
+          exit "$rc"
 
   # GitHub pauses schedules in a public repository after 60 days without activity, and
   # a schedule that never starts sends no alert. Re-enabling the workflow each run is
   # meant to restart that clock; the firm repo's sentinel-alive job is the backstop if
   # it does not.
   keepalive:
-    name: could not keep this watcher's schedule switched on
+    name: Keep this watcher switched on
     runs-on: ubuntu-latest
     permissions:
       actions: write
@@ -84,11 +125,180 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: gh api -X PUT "repos/${{ github.repository }}/actions/workflows/watch.yml/enable"
 
-  delegation:
-    name: a domain's nameservers changed at the registrar - check GoDaddy now
+  # Fails on purpose every 15 January (UTC), on the day set in the repository variable
+  # DRILL_DATE (YYYY-MM-DD, scheduled runs only: proves where scheduled alerts go), or
+  # when started by hand with "drill" ticked. No dependencies, so a broken check cannot
+  # suppress it.
+  drill:
+    name: Yearly fire drill (15 January)
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
+    permissions: {}
     steps:
-      - uses: actions/checkout@v4
-      - run: python3 dns_delegation_verify.py
+      - env:
+          EVENT: ${{ github.event_name }}
+          DRILL_INPUT: ${{ inputs.drill }}
+          DRILL_DATE: ${{ vars.DRILL_DATE }}
+        run: |
+          today=$(date -u +%Y-%m-%d)
+          drill=no
+          if [ "$EVENT" = "schedule" ] && { [ "${today#*-}" = "01-15" ] || [ "$DRILL_DATE" = "$today" ]; }; then
+            drill=yes
+          fi
+          if [ "$EVENT" = "workflow_dispatch" ] && [ "$DRILL_INPUT" = "true" ]; then
+            drill=yes
+          fi
+          if [ "$drill" = "yes" ]; then
+            echo "::error::THIS IS A FIRE DRILL. Open the run's summary page."
+            exit 1
+          fi
+          echo "No drill today."
+
+  explain:
+    name: What this alarm means - read me first
+    needs: [read, verdict, delegation, keepalive, drill]
+    if: always() && contains(needs.*.result, 'failure')
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - env:
+          READ: ${{ needs.read.result }}
+          VERDICT: ${{ needs.verdict.result }}
+          DELEGATION: ${{ needs.delegation.result }}
+          DELEGATION_RC: ${{ needs.delegation.outputs.rc }}
+          KEEPALIVE: ${{ needs.keepalive.result }}
+          DRILL: ${{ needs.drill.result }}
+          README: ${{ github.server_url }}/${{ github.repository }}#when-it-buzzes
+        run: |
+          out="$GITHUB_STEP_SUMMARY"
+          real=no
+          cat >> "$out" <<'EOF'
+          # What this alarm means
+
+          This watcher checks the firm's two domains, wealthpreservationmanagement.com and
+          wealthpreservationmanagement.ca, once a day. It runs under a GitHub account that is
+          signed in only on your phone, so that nothing on the work PC can change the firm's
+          DNS without you finding out. DNS decides where the website and the firm's email go.
+
+          EOF
+          if [ "$VERDICT" = "failure" ]; then
+            real=yes
+            cat >> "$out" <<'EOF'
+          ## Someone changed the firm's DNS in Cloudflare - check it was you
+
+          **Is this an emergency?** It can be. An unapproved change can send visitors to a fake
+          site, or let someone else receive the firm's email or get a certificate for its site.
+
+          The changes are listed on this page under "Changes Cloudflare logged", one per line,
+          with the time in UTC.
+
+          **If you (or a Claude session you asked) changed DNS or made a Cloudflare key in the
+          day or two before this alarm, and every line is that work: nothing to do.**
+
+          Otherwise, on your phone, now:
+
+          1. Open https://dash.cloudflare.com/profile/api-tokens and delete the key named
+             **WPM DNS edit**. That stops the work PC's sessions from changing DNS; the website
+             and email keep working.
+          2. If any line is something you don't recognise, change your Cloudflare password and
+             end every other session at https://dash.cloudflare.com/profile/access-management/sessions
+          3. Only then ask for help putting it right. Don't ask a session on the work PC to
+             investigate first: the work PC is what this watcher guards against.
+
+          EOF
+          fi
+          if [ "$READ" = "failure" ]; then
+            real=yes
+            cat >> "$out" <<'EOF'
+          ## The watcher could not read Cloudflare's change log
+
+          **This is NOT an all-clear.** Until it can read again, nobody is watching.
+
+          Usually its read key expired or was deleted. Deleting it is also exactly what an
+          intruder would do, so on your phone:
+
+          1. Open https://dash.cloudflare.com/profile/api-tokens and find **WPM DNS watch (phone)**.
+          2. If it is missing and you didn't delete it, treat this as a break-in: delete the
+             **WPM DNS edit** key, change your Cloudflare password, and end other sessions at
+             https://dash.cloudflare.com/profile/access-management/sessions
+          3. If it expired, make a new one and save it in this watcher: steps 3 and 4 of the
+             README (link at the bottom).
+          4. If the key looks fine, Cloudflare or GitHub may have had an outage. If tomorrow's
+             run fails the same way, do step 2.
+
+          EOF
+          fi
+          if [ "$DELEGATION" = "failure" ]; then
+            case "$DELEGATION_RC" in
+              1)
+                real=yes
+                cat >> "$out" <<'EOF'
+          ## A domain's registration changed: check GoDaddy now
+
+          **Is this an emergency? Yes.** Whoever runs a domain's nameservers controls its
+          website and email. This is changed at GoDaddy, not Cloudflare, so the other checks
+          cannot see it. The log of "Check 3 of 3" on this page says which domain and what it saw.
+
+          On your phone:
+
+          1. Sign in to GoDaddy at https://account.godaddy.com/products and open each domain.
+          2. Its nameservers must match the "expected" ones printed on the DRIFT lines of that
+             log, and DNSSEC must be off.
+          3. If not, and you didn't change them, change your GoDaddy password and call GoDaddy
+             to lock the domain.
+
+          EOF
+                ;;
+              2)
+                cat >> "$out" <<'EOF'
+          ## The registration check could not run (not a hijack sign)
+
+          Public DNS lookups failed, so the check could not see either domain's registration.
+          Nothing is known to be wrong. If tomorrow's run says the same, open the log of
+          "Check 3 of 3" on this page.
+
+          EOF
+                ;;
+              *)
+                cat >> "$out" <<'EOF'
+          ## The registration check did not finish (not a hijack sign)
+
+          "Check 3 of 3" stopped before it could look at the domains, usually a GitHub
+          hiccup. Nothing is known to be wrong. If tomorrow's run fails the same way, sign in
+          to GoDaddy and check the nameservers yourself (see the README, link at the bottom).
+
+          EOF
+                ;;
+            esac
+          fi
+          if [ "$KEEPALIVE" = "failure" ]; then
+            cat >> "$out" <<'EOF'
+          ## The watcher could not keep its own schedule switched on
+
+          Not a DNS problem. On your phone, open this repository's **Actions** tab and tap the
+          workflow. If it says it is disabled, tap **Enable workflow**.
+
+          EOF
+          fi
+          if [ "$DRILL" = "failure" ]; then
+            if [ "$real" = "yes" ]; then
+              echo "## This run is also the yearly fire drill - but the alarm above is REAL. Deal with it first." >> "$out"
+              echo >> "$out"
+            fi
+            cat >> "$out" <<'EOF'
+          ## This part is a FIRE DRILL (every 15 January)
+
+          A rehearsal, so that a real alarm years from now looks familiar. A real alarm arrives
+          the same way: a push notification on your phone, and an email whose subject starts
+          "Run failed: WPM DNS ALARM". Each real alarm is explained on this page, like this.
+
+          Please check that all three arrived:
+
+          1. the push notification from the GitHub app on your phone;
+          2. the email at this watcher's Gmail;
+          3. the forwarded copy at your work address.
+
+          If one is missing, that is the thing to fix. Otherwise there is nothing to do.
+
+          EOF
+          fi
+          echo "More detail: $README" >> "$out"
