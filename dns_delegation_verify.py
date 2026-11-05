@@ -171,8 +171,10 @@ def main() -> int:
                 # for the domain too. (An RRset holds no duplicates.)
                 print(f"OK      {domain} NS ({where})")
             else:
+                # The expected pair is printed too: the alarm tells the operator to compare
+                # the registrar's nameservers against this line.
                 drift.append(f"{domain} NS ({where}): expected {sorted(NAMESERVERS)}, found {sorted(ns)}")
-                print(f"DRIFT   {domain} NS ({where}) -> {sorted(ns)}")
+                print(f"DRIFT   {domain} NS ({where}) -> {sorted(ns)}; expected {sorted(NAMESERVERS)}")
         ds, why = _observe(lookup, domain, "DS")
         if why:
             unseen.append(f"{domain} DS: {why}")

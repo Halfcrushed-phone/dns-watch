@@ -1,5 +1,46 @@
 # DNS watch (phone-only)
 
+**Got an email or notification saying "Run failed: WPM DNS ALARM"?** Read
+[When it buzzes](#when-it-buzzes) below. The short version: tap **View workflow run** in
+the email; the page it opens says what happened and exactly what to do, on your phone.
+
+## When it buzzes
+
+The run page says what kind it is, under "What this alarm means", with the steps to
+take: a **fire drill** (every 15 January, or one you started), a **real** alarm, or a
+problem with the watcher itself.
+
+- **Changes logged.** Each `CHANGE` line is one write to Cloudflare. If you approved
+  that work in the day or two before, and every line is it, nothing to do. Otherwise, on
+  the phone: delete the **WPM DNS edit** key at https://dash.cloudflare.com/profile/api-tokens
+  (the website and email keep working), and if any line is unfamiliar, change the
+  Cloudflare password and end other sessions.
+- **Could not read the change log.** NOT an all-clear. Usually the watcher's key
+  expired: renew it (setup steps 3 and 4). If the key was deleted and you didn't delete
+  it, treat it as a break-in, as above.
+- **Registration changed.** Check the domains at GoDaddy now: nameservers must be the
+  "expected" ones on the run log's NS DRIFT lines (no such line: they are fine), and
+  DNSSEC must be off (a "DS present" line means it is on). (A
+  "could not run" or "did not finish" note is not a hijack sign.)
+- **Could not keep its schedule switched on.** Not a DNS problem: open this
+  repository's **Actions** tab, tap the workflow, and tap **Enable workflow** if it says
+  it is disabled.
+
+Logs here never show record contents. To see what a record was set to, a session on the
+PC can read the firm repo's own run, but do the phone steps first: the PC is what this
+watches.
+
+**Fire drills.** Every 15 January (UTC) the run fails on purpose, so the alarm stays
+familiar and you know it still reaches the phone, this account's Gmail and the work
+copy. To rehearse any time: **Actions → the workflow → Run workflow**, tick **drill**.
+To prove a *scheduled* alarm reaches you (for example after changing this repository),
+set a repository variable **DRILL_DATE** to tomorrow's date (`YYYY-MM-DD`, UTC) under
+**Settings → Secrets and variables → Actions → Variables**; delete it afterwards.
+
+**Never change the line `cron: "23 3 * * *"`** in the workflow, and never merge a change
+from someone else that does: GitHub sends scheduled alarms to whoever last changed that
+line.
+
 A daily check of the firm's two domains that nothing on the firm's PC can switch off.
 
 **Why it exists.** A standing key on the firm's PC can change the domains' DNS. The
@@ -43,20 +84,14 @@ from the phone.
    repository secret**, name `CLOUDFLARE_AUDIT_READ_TOKEN`, paste, **Add secret**.
 5. Install the GitHub app, sign in with the new account, and turn on push
    notifications for **Actions: failed workflows**.
+6. For a copy at work: in this account's mailbox, add a filter that forwards only
+   GitHub's alarm emails (from `notifications@github.com`, subject containing
+   "Run failed") to the work address. Forward nothing else: the PC can read the work
+   mailbox, and this account's sign-in and recovery emails must never reach it.
 
 Then the setup session points the firm repo at this repository (so it notices if the
 watcher stops), makes one harmless test record (shown to you first) and removes it. The
 first run reads everything since 28 October 2026, so it buzzes whether or not it saw
 the test: the session tells you the test record's name, and the test has worked only if
-one `CHANGE` line names it. A record made less than 6 hours before a run is read by the
+a `CHANGE` line names it (adding and removing it can make two lines). A record made less than 6 hours before a run is read by the
 run after.
-
-## When it buzzes
-
-Open the failed run. Each `CHANGE` line is one write. If you approved a change that
-day and every line is it, nothing to do. Any other line: revoke the **WPM DNS edit**
-key in Cloudflare from the phone. "Could not be read" usually means the key expired;
-renew it (step 3 and 4) — but an intruder revoking it looks the same, so check
-Cloudflare's token list too. Logs here never show record contents; to see what a
-record was set to, ask a session on the PC to read the firm repo's own run, which
-does.
