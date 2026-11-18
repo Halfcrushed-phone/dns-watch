@@ -24,6 +24,19 @@ Rules, each decided by the plan council (.council/dns-watch-blind-spots-plan-202
   custom-domain write was seen, so those are unreported and unmeasured (RISK-2026-54).
   There is no allowlist: an approved change is reported like any other, and the person
   who approved it confirms every printed line is theirs.
+- One narrow exception, Cloudflare renewing its own certificate (operator, 2026-11-18,
+  after both watchers alarmed on the 2026-11-17 renewals: "I don't want to get alarms
+  about these that are not an issue"; plan council .council/dns-watch-cert-renewal-plan-
+  2026-11-18/). A renewal writes and deletes `_acme-challenge.<zone>` TXT records as
+  actor {"type": "system"}, with a system certificate-pack event for the same zone within
+  a second. renewal() quiets a DNS entry only when every measured field matches, a
+  certificate event of the measured kind for the same zone id is in the same window
+  within RENEWAL_TOLERANCE, and the read was complete; such entries print one RENEWAL
+  line per zone and do not count as changes. The same records written with a key or a
+  login still alarm (the actor is not system), as does a system DNS write with no
+  matching certificate event, or any other record. Any missing or unexpected field means
+  no exemption. The shape alone is never the exemption: it is also what a
+  certificate-capture attack looks like.
 - Contiguous windows. Each run scans [A - LAG, start - LAG), where A is the start of the
   last run whose read succeeded. LAG covers the delay before an entry becomes readable.
   A failed read never moves the window on, so its stretch is scanned again next time.
@@ -35,8 +48,9 @@ Rules, each decided by the plan council (.council/dns-watch-blind-spots-plan-202
   types and names only: no record content (an A record's content is an IP address) and
   no token names.
 
-Exit 0 = the whole window was read and nothing was written. Exit 1 = the whole window
-was read and changes are listed. Exit 2 = cannot see (no key, API error, the window
+Exit 0 = the whole window was read and there is nothing to confirm (a renewal alone
+prints RENEWAL lines and still exits 0). Exit 1 = the whole window was read and changes
+are listed. Exit 2 = cannot see (no key, API error, the window
 could not be determined) - never read exit 2 as all-clear. Anything found before a
 failure is still printed.
 
@@ -226,13 +240,82 @@ def reportable(entry: dict, since: datetime, before: datetime) -> bool:
     return False
 
 
+SYSTEM_ACTOR = {"type": "system"}  # Cloudflare's own work: no key or login can write it
+RENEWAL_TOLERANCE = timedelta(seconds=120)  # measured gaps 2026-11-17: under 0.2 s
+
+
+def _aware_time(entry: dict) -> datetime | None:
+    """The entry's time, only if it parses and states its own timezone. Stricter than
+    parse_time on purpose: that one reads a zoneless time as this machine's local time,
+    which is harmless for the window but would shift a 120-second match."""
+    try:
+        t = datetime.fromisoformat(entry["action"]["time"].replace("Z", "+00:00"))
+    except (KeyError, TypeError, AttributeError, ValueError):
+        return None
+    return t.astimezone(timezone.utc) if t.tzinfo is not None else None
+
+
+def _renewal_cert_body(body, zone_id: str) -> bool:
+    return (isinstance(body, dict) and body.get("zone_id") == zone_id
+            and body.get("type") == "universal" and body.get("validation_method") == "txt"
+            and body.get("validation_type") == "dv")
+
+
+def _renewal_cert(entry: dict, zone_id: str) -> bool:
+    """A certificate-pack event of the measured renewal kind for this zone id: "created"
+    (a create, one body) or "ordered" (an update, old and new bodies). "Deployed" carries
+    no validation fields, so it never counts and is not needed."""
+    res = entry.get("resource") or {}
+    action = entry.get("action") or {}
+    if not (entry.get("actor") == SYSTEM_ACTOR and res.get("product") == "certificates"
+            and res.get("type") == "certificate_pack" and action.get("result") == "success"):
+        return False
+    value = res.get("value")
+    if not isinstance(value, dict):
+        return False
+    bodies = {"create": [value], "update": [value.get("old"), value.get("new")]}.get(
+        action.get("type"), [])
+    return bool(bodies) and all(_renewal_cert_body(b, zone_id) for b in bodies)
+
+
+def renewal(entry: dict, entries: list, since: datetime, before: datetime) -> bool:
+    """True only for a DNS write that is Cloudflare renewing its own certificate (see the
+    module docstring). Anything missing, unexpected or raising means False: alarm."""
+    try:
+        res = entry.get("resource") or {}
+        action = entry.get("action") or {}
+        zone = entry.get("zone") or {}
+        value = res.get("value")
+        zone_id, zone_name = zone.get("id"), zone.get("name")
+        t = _aware_time(entry)
+        if not (entry.get("actor") == SYSTEM_ACTOR
+                and action.get("type") in ("create", "delete")
+                and action.get("result") == "success"
+                and res.get("product") == "dns" and res.get("type") == "record"
+                and zone_name in ZONES and isinstance(zone_id, str) and zone_id
+                and isinstance(value, dict) and value.get("type") == "TXT"
+                and value.get("name") == "_acme-challenge." + zone_name
+                and value.get("zone_id") == zone_id and value.get("zone_name") == zone_name
+                and t is not None):
+            return False
+        for other in entries:
+            ct = _aware_time(other)
+            if (ct is not None and since <= ct < before and abs(ct - t) <= RENEWAL_TOLERANCE
+                    and _renewal_cert(other, zone_id)):
+                return True
+        return False
+    except Exception:  # noqa: BLE001 - an exemption bug must never hide a change
+        return False
+
+
 def _record(entry: dict) -> str:
-    """Record fields a DNS write carries, if any (request or response body). In public
-    mode, only for a DNS record: another resource's `name` can be a key's name."""
+    """Record fields a DNS write carries, if any (the logged record, or the request or
+    response body). In public mode, only for a DNS record: another resource's `name` can
+    be a key's name."""
     res = entry.get("resource") or {}
     if PUBLIC and "dns" not in _kind(res):
         return "(details not shown in a public log)"
-    for body in (res.get("response"), res.get("request")):
+    for body in (res.get("value"), res.get("response"), res.get("request")):
         if isinstance(body, dict):
             fields = ("type", "name") if PUBLIC else ("type", "name", "content")
             parts = [f"{k}={body[k]!r}" for k in fields
@@ -297,9 +380,21 @@ def main(argv: list[str], now: datetime | None = None) -> int:
         failure = f"could not determine the window: {type(exc).__name__}"
         since = before = start
     found = [e for e in entries if reportable(e, since, before)]
+    renewals: Counter = Counter()
+    if not failure:  # a renewal is judged only on a complete read
+        kept = []
+        for e in found:
+            if renewal(e, entries, since, before):
+                renewals[_zone_name(e)] += 1
+            else:
+                kept.append(e)
+        found = kept
     if "--shapes" in argv:  # measuring: counts only, never contents
         print("\n".join(shapes(entries)))
     else:
+        for zone, n in sorted(renewals.items()):
+            print(f"RENEWAL zone={zone!r}: {n} _acme-challenge write(s) by Cloudflare itself, "
+                  "matched to its own certificate renewal. Nothing to confirm.")
         for e in found:
             print(describe(e))
     if failure:
@@ -311,7 +406,9 @@ def main(argv: list[str], now: datetime | None = None) -> int:
               "Confirm every line is a change you approved; any other line means treat the "
               "DNS edit key as exposed.")
         return 1
-    print(f"No changes to the zones in this window ({len(entries)} log entries read).")
+    print("No changes to confirm in this window"
+          + (" (only Cloudflare's own certificate renewal, listed above)" if renewals else "")
+          + f" ({len(entries)} log entries read).")
     return 0
 
 
