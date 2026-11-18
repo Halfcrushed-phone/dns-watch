@@ -15,6 +15,11 @@ problem with the watcher itself.
   the phone: delete the **WPM DNS edit** key at https://dash.cloudflare.com/profile/api-tokens
   (the website and email keep working), and if any line is unfamiliar, change the
   Cloudflare password and end other sessions.
+  Cloudflare renewing the website's own certificate (every couple of months per domain)
+  does not buzz: it shows as a `RENEWAL` line in a green run. It is quiet only when
+  Cloudflare's own system made the `_acme-challenge` records and logged its certificate
+  renewal for the same domain within two minutes. The same records made with a key or a
+  login, or any other change by Cloudflare's system, still buzz.
 - **Could not read the change log.** NOT an all-clear. Usually the watcher's key
   expired: renew it (setup steps 3 and 4). If the key was deleted and you didn't delete
   it, treat it as a break-in, as above.
